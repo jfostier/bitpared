@@ -323,7 +323,7 @@ public:
         while (i > 0) {
             const uint b = i / BLOCK_SIZE;      // block identifier
             const uint64_t& M = mv[b][char2idx[Q[i-1]]];
-            uint64_t bit = 1ull << ((j % BLOCK_SIZE) + DIAG_R0);
+            uint64_t bit = 1ull << ((j - b*BLOCK_SIZE) + DIAG_R0);
 
             if ((M | ~(M | bv[i].D0)) & bit) {  // diagonal
                 i--; j--;
