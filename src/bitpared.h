@@ -325,13 +325,13 @@ public:
             const uint64_t& M = mv[b][char2idx[Q[i-1]]];
             uint64_t bit = 1ull << ((j - b*BLOCK_SIZE) + DIAG_R0);
 
-            if ((M | ~(M | bv[i].D0)) & bit) {  // diagonal
+            if ((j > 0) && ((M | ~bv[i].D0) & bit)) {  // diagonal
                 i--; j--;
                 if (CIGAR.empty() || CIGAR.back().first != 'M')
                     CIGAR.push_back(std::make_pair('M', 1));
                 else
                     CIGAR.back().second++;
-            } else if (bv[i].HP & bit) {
+            } else if ((j > 0) && (bv[i].HP & bit)) {
                 j--;
                 if (CIGAR.empty() || CIGAR.back().first != 'D')
                     CIGAR.push_back(std::make_pair('D', 1));
