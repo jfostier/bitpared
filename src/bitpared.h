@@ -1,5 +1,6 @@
 /******************************************************************************
- *  Copyright (C) 2021        Jan Fostier <jan.fostier@ugent.be>              *
+ *  Copyright (C) 2021-2022   Jan Fostier <jan.fostier@ugent.be>              *
+ *  Copyright (C) 2021-2022   Luca Renders <luca.renders@ugent.be>            *
  *                                                                            *
  *  This program is free software: you can redistribute it and/or modify      *
  *  it under the terms of the GNU Affero General Public License as            *
@@ -44,8 +45,6 @@
 typedef struct {
     uint64_t HP;    // bit vector to indicate which delta_H == +1
     uint64_t HN;    // bit vector to indicate which delta_H == -1
-    uint64_t VP;    // bit vector to indicate which delta_V == +1
-    uint64_t VN;    // bit vector to indicate which delta_V == -1
     uint64_t D0;    // bit vector to indicate which delta_D == 0
     uint64_t RAC;   // bit vector to indicate the Rightmost Active Column
                     // = rightmost column with a value <= maxED
@@ -211,8 +210,6 @@ public:
         // aliases to the bit vectors of the current row i (will be computed)
         uint64_t& HP = bv[i].HP;
         uint64_t& HN = bv[i].HN;
-        uint64_t& VP = bv[i].VP;
-        uint64_t& VN = bv[i].VN;
         uint64_t& D0 = bv[i].D0;
         uint64_t& RAC = bv[i].RAC;
 
@@ -234,8 +231,8 @@ public:
 
         // compute the 5 bitvectors that encode the edit distance minScore (Hyyro)
         D0 = (((M & HP) + HP) ^ HP) | M | HN;
-        VP = HN | ~(D0 | HP);
-        VN = D0 & HP;
+        uint64_t VP = HN | ~(D0 | HP);
+        uint64_t VN = D0 & HP;
         HP = (VN << 1) | ~(D0 | (VP << 1));
         HN = (D0 & (VP << 1));
 
@@ -261,38 +258,41 @@ public:
     }
 
     /**
-     * Find the minimum edit distance value and its position on a row
+     * Find the minimum edit distance value and its position in a row
      * @param i Row index
      * @param jMin Column index at which minimum value is found (output)
      * @param minScore Mimumum value (output)
      */
     void findMinimumAtRow(uint i, uint& jMin, uint& minScore) const
     {
-        // assume the minimal value is found at the diagonal
-        minScore = bv[i].score;
-        jMin = i;
+        jMin = getFirstColumn(i);
+        minScore = operator()(i, jMin);
 
-        // check for lower values left of the diagonal
-        uint thisScore = bv[i].score;
-        uint64_t bit = 1ull << ((i % BLOCK_SIZE) + DIAG_R0);
-        for (uint j = i; j >= getFirstColumn(i); j--, bit >>= 1) {
-            if (bv[i].HP & bit) thisScore--;
-            if (bv[i].HN & bit) thisScore++;
-            if (thisScore < minScore) {
-                minScore = thisScore;
-                jMin = j-1;
-            }
-        }
-
-        // check values to the right of the diagonal
-        thisScore = bv[i].score;
-        bit = 1ull << ((i % BLOCK_SIZE) + LEFT);
-        for (uint j = i+1; j <= getLastColumn(i); j++, bit <<= 1) {
-            if (bv[i].HP & bit) thisScore++;
-            if (bv[i].HN & bit) thisScore--;
+        for (uint j = getFirstColumn(i) + 1; j <= getLastColumn(i); j++) {
+            uint thisScore = operator()(i, j);
             if (thisScore < minScore) {
                 minScore = thisScore;
                 jMin = j;
+            }
+        }
+    }
+
+    /**
+     * Find the minimum edit distance value and its position in a column
+     * @param j Column index
+     * @param iMin Row index at which minimum value is found (output)
+     * @param minScore Mimumum value (output)
+     */
+    void findMinimumAtCol(uint j, uint& iMin, uint& minScore) const
+    {
+        iMin = getFirstRow(j);
+        minScore = operator()(iMin, j);
+
+        for (uint i = getFirstRow(j) + 1; i <= getLastRow(j); i++) {
+            uint thisScore = operator()(i, j);
+            if (thisScore < minScore) {
+                minScore = thisScore;
+                iMin = i;
             }
         }
     }
@@ -331,13 +331,13 @@ public:
                     CIGAR.push_back(std::make_pair('M', 1));
                 else
                     CIGAR.back().second++;
-            } else if ((j > 0) && (bv[i].HP & bit)) {
+            } else if ((j > 0) && (bv[i].HP & bit)) {  // left
                 j--;
                 if (CIGAR.empty() || CIGAR.back().first != 'D')
                     CIGAR.push_back(std::make_pair('D', 1));
                 else
                     CIGAR.back().second++;
-            } else if (bv[i].VP & bit) {
+            } else {                                   // up
                 i--;
                 if (CIGAR.empty() || CIGAR.back().first != 'I')
                     CIGAR.push_back(std::make_pair('I', 1));
@@ -351,7 +351,7 @@ public:
     }
 
     /**
-     * Operator () overloading -- this procedure is O(|i-j|)
+     * Operator () overloading -- this procedure is O(1)
      * @param i Row index
      * @param j Column index
      * @return Score at position (i, j)
@@ -360,20 +360,17 @@ public:
         assert(i < m);     // make sure i and j are within matrix bounds
         assert(j < n);
 
-        uint score = bv[i].score;
+        // we need the bits in the range [b,e[ in HN and HP
         const uint bit = (i % BLOCK_SIZE) + DIAG_R0;
-        if (i > j) {
-            for (uint o = 0; o < i-j; o++) {
-                score -= (bv[i].HP >> (bit - o)) & 1ull;
-                score += (bv[i].HN >> (bit - o)) & 1ull;
-            }
-        } else {
-            for (uint o = 1; o <= j-i; o++) {
-                score += (bv[i].HP >> (bit + o)) & 1ull;
-                score -= (bv[i].HN >> (bit + o)) & 1ull;
-            }
-        }
+        uint b = (i > j) ? bit - (i - j) + 1 : bit + 1;
+        uint e = (i > j) ? bit + 1 : bit + (j - i) + 1;
 
+        uint64_t mask = ((1ull << (e - b)) - 1ull) << b;
+        int negatives = __builtin_popcountll(bv[i].HN & mask);
+        int positives = __builtin_popcountll(bv[i].HP & mask);
+
+        uint score = bv[i].score;
+        score += (i > j) ? (negatives - positives) : (positives - negatives);
         return score;
     }
 
@@ -400,20 +397,38 @@ public:
 
     /**
      * Retrieves the first column index that needs to be filled in for the row
-     * @param i the row to fill in
-     * @returns the first column to fill in
+     * @param i The row to fill in
+     * @returns The first column to fill in
      */
     uint getFirstColumn(uint i) const {
-        return (i <= Wv) ? 1u : i - Wv;
+        return (i <= Wv) ? 0u : i - Wv;
     }
 
     /**
      * Retrieves the last column index that needs to be filled in for the row
-     * @param i the row to fill in
-     * @returns the last column to fill in
+     * @param i The row to fill in
+     * @returns The last column to fill in
      */
     uint getLastColumn(uint i) const {
         return std::min(n - 1, i + Wh);
+    }
+
+   /**
+     * Retrieves the first row index that needs to be filled in for the column
+     * @param j the column to fill in
+     * @returns the first row to fill in
+     */
+    uint getFirstRow(uint j) const {
+        return (j <= Wh) ? 0u : j - Wh;
+    }
+
+    /**
+     * Retrieves the last row index that needs to be filled in for the column
+     * @param j The column to fill in
+     * @returns The last row to fill in
+     */
+    uint getLastRow(uint j) const {
+        return std::min(m - 1, j + Wv);
     }
 
     /**
@@ -449,12 +464,21 @@ public:
     }
 
     /**
+     * Check if a certain row contains the final column (column n+1)
+     * @param i The row index
+     * @return True of false
+     */
+    bool inFinalColumn(uint i) const {
+        return i >= getNumberOfRows() - getSizeOfFinalColumn();
+    }
+
+    /**
      * Print the banded matrix
      * @param maxRow Last row index to print
      */
     void printMatrix(uint maxRow = 500) const {
         for (uint i = 0; i < std::min<uint>(maxRow + 1, m); i++) {
-            uint firstCol = (i <= Wv) ? 0u : getFirstColumn(i);
+            uint firstCol = getFirstColumn(i);
             uint lastCol = getLastColumn(i);
             std::cout << (i < 10 ? "0" : "") << std::to_string(i);
             std::cout << " [" << getFirstColumn(i) << ","
@@ -471,6 +495,7 @@ public:
             uint minScore, minJ;
             findMinimumAtRow(i, minJ, minScore);
             std::cout << "  Min: " << minScore << "@" << minJ;
+            std::cout << " FC: " << (inFinalColumn(i) ? " true" : " false");
             std::cout << std::endl;
         }
     }
